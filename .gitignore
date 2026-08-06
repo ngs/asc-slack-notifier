@@ -1,0 +1,19 @@
+# Build output
+/bin/
+/dist/
+bootstrap
+*.zip
+
+# Test and coverage output
+*.out
+coverage.html
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
