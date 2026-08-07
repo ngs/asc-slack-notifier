@@ -46,6 +46,7 @@ func main() {
 	handler, err := webhook.NewHandler(webhook.Options{
 		Secret:     cfg.Secret,
 		Path:       cfg.WebhookPath,
+		HealthPath: cfg.HealthPath,
 		Notifier:   slackClient,
 		NotifyPing: cfg.NotifyPing,
 		Logger:     logger,
@@ -57,7 +58,8 @@ func main() {
 
 	switch cfg.Mode {
 	case config.ModeLambda:
-		logger.Info("starting in lambda mode", slog.String("path", cfg.WebhookPath))
+		logger.Info("starting in lambda mode",
+			slog.String("path", cfg.WebhookPath), slog.String("health_path", cfg.HealthPath))
 		lambda.Start(httpadapter.NewV2(handler).ProxyWithContext)
 	default:
 		if err := serveHTTP(handler, cfg, logger); err != nil {
@@ -82,7 +84,8 @@ func serveHTTP(handler http.Handler, cfg *config.Config, logger *slog.Logger) er
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("starting in http mode",
-			slog.String("addr", srv.Addr), slog.String("path", cfg.WebhookPath))
+			slog.String("addr", srv.Addr), slog.String("path", cfg.WebhookPath),
+			slog.String("health_path", cfg.HealthPath))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return

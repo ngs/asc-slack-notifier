@@ -1,0 +1,180 @@
+name: Deploy
+
+# Both jobs are gated on the repository variable DEPLOY_TARGET, so a plain fork
+# with no configuration simply skips them and stays green.
+# Set DEPLOY_TARGET to "cloudrun" or "lambda" to enable one of them.
+# See docs/DEPLOYMENT.md for the required variables and secrets.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-cloudrun:
+    name: Deploy to Cloud Run
+    if: vars.DEPLOY_TARGET == 'cloudrun'
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'asia-northeast1' }}
+      CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'asc-slack-notifier' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      # gcloud run deploy creates the service on the first run and updates it
+      # afterwards, so no manual provisioning is needed.
+      - name: Deploy
+        env:
+          ASC_WEBHOOK_SECRET: ${{ secrets.ASC_WEBHOOK_SECRET }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL }}
+          WEBHOOK_PATH: ${{ vars.WEBHOOK_PATH }}
+          HEALTH_PATH: ${{ vars.HEALTH_PATH }}
+          NOTIFY_PING: ${{ vars.NOTIFY_PING }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ASC_WEBHOOK_SECRET}" ]; then
+            echo "::error::secret ASC_WEBHOOK_SECRET is not set"
+            exit 1
+          fi
+          if [ -z "${SLACK_WEBHOOK_URL}" ] && { [ -z "${SLACK_BOT_TOKEN}" ] || [ -z "${SLACK_CHANNEL}" ]; }; then
+            echo "::error::set secret SLACK_WEBHOOK_URL, or secret SLACK_BOT_TOKEN together with variable SLACK_CHANNEL"
+            exit 1
+          fi
+
+          # "^@^" declares @ as the separator so that values containing commas
+          # are passed through untouched.
+          env_vars="ASC_WEBHOOK_SECRET=${ASC_WEBHOOK_SECRET}"
+          for name in SLACK_WEBHOOK_URL SLACK_BOT_TOKEN SLACK_CHANNEL WEBHOOK_PATH HEALTH_PATH NOTIFY_PING LOG_LEVEL; do
+            value="${!name}"
+            if [ -n "${value}" ]; then
+              env_vars="${env_vars}@${name}=${value}"
+            fi
+          done
+
+          gcloud run deploy "${CLOUD_RUN_SERVICE}" \
+            --source . \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars "^@^${env_vars}" \
+            --quiet
+
+      - name: Show service URL
+        run: |
+          set -euo pipefail
+          url=$(gcloud run services describe "${CLOUD_RUN_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" --region "${GCP_REGION}" \
+            --format 'value(status.url)')
+          path="${{ vars.WEBHOOK_PATH || '/webhook' }}"
+          echo "Webhook URL: ${url}${path}" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-lambda:
+    name: Deploy to AWS Lambda
+    if: vars.DEPLOY_TARGET == 'lambda'
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+      LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME || 'asc-slack-notifier' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Produces dist/asc-slack-notifier-lambda-arm64.zip containing a single
+      # "bootstrap" binary, as the provided.al2023 runtime expects.
+      - name: Build deployment package
+        run: make lambda-zip
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update function code
+        run: |
+          set -euo pipefail
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --zip-file "fileb://dist/asc-slack-notifier-lambda-arm64.zip" \
+            --publish \
+            --no-cli-pager \
+            --query 'Version' --output text
+
+      # A function stays in "InProgress" briefly after a code update; the next
+      # configuration call would be rejected with ResourceConflictException.
+      - name: Wait for the code update to settle
+        run: aws lambda wait function-updated-v2 --function-name "${LAMBDA_FUNCTION_NAME}"
+
+      - name: Update function configuration
+        env:
+          ASC_WEBHOOK_SECRET: ${{ secrets.ASC_WEBHOOK_SECRET }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL }}
+          WEBHOOK_PATH: ${{ vars.WEBHOOK_PATH }}
+          HEALTH_PATH: ${{ vars.HEALTH_PATH }}
+          NOTIFY_PING: ${{ vars.NOTIFY_PING }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ASC_WEBHOOK_SECRET}" ]; then
+            echo "::error::secret ASC_WEBHOOK_SECRET is not set"
+            exit 1
+          fi
+          if [ -z "${SLACK_WEBHOOK_URL}" ] && { [ -z "${SLACK_BOT_TOKEN}" ] || [ -z "${SLACK_CHANNEL}" ]; }; then
+            echo "::error::set secret SLACK_WEBHOOK_URL, or secret SLACK_BOT_TOKEN together with variable SLACK_CHANNEL"
+            exit 1
+          fi
+
+          # Built with jq so that the values are JSON-escaped rather than
+          # interpolated into the command line.
+          jq -n \
+            --arg ASC_WEBHOOK_SECRET "${ASC_WEBHOOK_SECRET}" \
+            --arg SLACK_WEBHOOK_URL "${SLACK_WEBHOOK_URL}" \
+            --arg SLACK_BOT_TOKEN "${SLACK_BOT_TOKEN}" \
+            --arg SLACK_CHANNEL "${SLACK_CHANNEL}" \
+            --arg WEBHOOK_PATH "${WEBHOOK_PATH}" \
+            --arg HEALTH_PATH "${HEALTH_PATH}" \
+            --arg NOTIFY_PING "${NOTIFY_PING}" \
+            --arg LOG_LEVEL "${LOG_LEVEL}" \
+            '{Variables: ($ARGS.named | with_entries(select(.value != "")))}' \
+            > /tmp/lambda-env.json
+
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --environment "file:///tmp/lambda-env.json" \
+            --no-cli-pager \
+            --query 'LastUpdateStatus' --output text
+
+          aws lambda wait function-updated-v2 --function-name "${LAMBDA_FUNCTION_NAME}"
+          rm -f /tmp/lambda-env.json

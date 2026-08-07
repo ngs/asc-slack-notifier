@@ -11,8 +11,15 @@ import (
 // MaxBodyBytes caps the accepted request body size.
 const MaxBodyBytes = 1 << 20 // 1 MiB
 
-// HealthPath answers load balancer and Cloud Run health checks.
-const HealthPath = "/healthz"
+// DefaultWebhookPath is the route notifications are posted to when Options
+// leaves Path empty.
+const DefaultWebhookPath = "/webhook"
+
+// DefaultHealthPath answers load balancer and Cloud Run health checks.
+//
+// It is deliberately not "/healthz": the Google frontend in front of Cloud Run
+// can intercept that path, so a request to it never reaches the container.
+const DefaultHealthPath = "/health"
 
 // Notifier delivers a parsed webhook payload to a chat destination.
 type Notifier interface {
@@ -23,8 +30,12 @@ type Notifier interface {
 type Options struct {
 	// Secret is the shared HMAC-SHA256 secret. Required.
 	Secret string
-	// Path is the route notifications are posted to. Defaults to /webhook.
+	// Path is the route notifications are posted to. Defaults to
+	// DefaultWebhookPath.
 	Path string
+	// HealthPath is the route answering health checks. Defaults to
+	// DefaultHealthPath.
+	HealthPath string
 	// Notifier receives every accepted payload. Required.
 	Notifier Notifier
 	// NotifyPing controls whether ping deliveries reach the notifier.
@@ -37,6 +48,7 @@ type Options struct {
 type Handler struct {
 	secret     string
 	path       string
+	healthPath string
 	notifier   Notifier
 	notifyPing bool
 	logger     *slog.Logger
@@ -53,12 +65,19 @@ func NewHandler(opts Options) (*Handler, error) {
 	h := &Handler{
 		secret:     opts.Secret,
 		path:       opts.Path,
+		healthPath: opts.HealthPath,
 		notifier:   opts.Notifier,
 		notifyPing: opts.NotifyPing,
 		logger:     opts.Logger,
 	}
 	if h.path == "" {
-		h.path = "/webhook"
+		h.path = DefaultWebhookPath
+	}
+	if h.healthPath == "" {
+		h.healthPath = DefaultHealthPath
+	}
+	if h.path == h.healthPath {
+		return nil, errors.New("webhook: Path and HealthPath must differ")
 	}
 	if h.logger == nil {
 		h.logger = slog.Default()
@@ -69,7 +88,7 @@ func NewHandler(opts Options) (*Handler, error) {
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case HealthPath:
+	case h.healthPath:
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			methodNotAllowed(w, http.MethodGet)
 			return

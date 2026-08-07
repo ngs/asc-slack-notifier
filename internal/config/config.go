@@ -28,6 +28,8 @@ type Config struct {
 	Port string
 	// WebhookPath is the path App Store Connect posts notifications to.
 	WebhookPath string
+	// HealthPath is the path answering health checks.
+	HealthPath string
 	// Secret is the shared HMAC-SHA256 secret registered with the webhook.
 	Secret string
 	// SlackWebhookURL is a Slack Incoming Webhook URL. Takes precedence over
@@ -56,6 +58,7 @@ func Load() (*Config, error) {
 		Mode:            resolveMode(),
 		Port:            envOr("PORT", "8080"),
 		WebhookPath:     normalizePath(envOr("WEBHOOK_PATH", "/webhook")),
+		HealthPath:      normalizePath(envOr("HEALTH_PATH", "/health")),
 		Secret:          os.Getenv("ASC_WEBHOOK_SECRET"),
 		SlackWebhookURL: strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL")),
 		SlackBotToken:   strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN")),
@@ -74,6 +77,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.SlackWebhookURL == "" && (cfg.SlackBotToken == "" || cfg.SlackChannel == "") {
 		return nil, ErrNoSlackDestination
+	}
+	if cfg.HealthPath == cfg.WebhookPath {
+		return nil, fmt.Errorf("HEALTH_PATH and WEBHOOK_PATH must differ (both are %q)", cfg.HealthPath)
 	}
 	return cfg, nil
 }

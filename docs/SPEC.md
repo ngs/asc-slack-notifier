@@ -92,6 +92,7 @@ Mode resolution (`RUN_MODE` env var):
 | `RUN_MODE` | – | `http` / `lambda`. Auto-detected when unset |
 | `PORT` | – | Port for http mode. Default `8080` |
 | `WEBHOOK_PATH` | – | Receive path. Default `/webhook` |
+| `HEALTH_PATH` | – | Health check path. Default `/health`. Not `/healthz`: the Google frontend in front of Cloud Run can intercept that path before it reaches the container |
 | `NOTIFY_PING` | – | `false` suppresses Slack messages for pings. Default `true` |
 | `LOG_LEVEL` | – | `debug`/`info`/`warn`/`error` via `log/slog`. Default `info` |
 
@@ -129,8 +130,9 @@ Keep dependencies minimal: only `aws-lambda-go` and
 
 ## Handler behavior
 
-1. Anything other than `POST {WEBHOOK_PATH}` → 404/405. `GET /healthz` →
-   `200 ok` (for Cloud Run / LB health checks).
+1. Anything other than `POST {WEBHOOK_PATH}` → 404/405. `GET {HEALTH_PATH}` →
+   `200 ok` (for Cloud Run / LB health checks). `HEALTH_PATH` and
+   `WEBHOOK_PATH` must differ; startup fails when they collide.
 2. Read the body with a 1 MiB cap (`http.MaxBytesReader`).
 3. Read the `x-apple-signature` header (case-insensitive). Format:
    `hmacsha256=<hex>`. Missing header, malformed value, or HMAC mismatch
@@ -166,7 +168,7 @@ Use Block Kit. Common format:
   `This is my secret`, body `Hello, World!` →
   `7f062172b01cb00b53ca068614674a3d982a34062a0f5d37687d5e3377e54657`), plus
   mismatch, missing header, and bad prefix cases.
-- `handler_test.go` covers 200 / 401 / 405 / healthz / 502 on Slack failure
+- `handler_test.go` covers 200 / 401 / 405 / health check / 502 on Slack failure
   via httptest. Slack client is an interface with a mock injected.
 - Dockerfile is multi-stage and the final image runs as non-root.
 - README (English) includes: overview, Configuration (env table), Deploy to

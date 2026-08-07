@@ -56,6 +56,15 @@ func TestNewHandlerValidation(t *testing.T) {
 	if _, err := NewHandler(Options{Secret: testSecret}); err == nil {
 		t.Error("NewHandler without notifier: error = nil, want error")
 	}
+	_, err := NewHandler(Options{
+		Secret:     testSecret,
+		Path:       "/same",
+		HealthPath: "/same",
+		Notifier:   &mockNotifier{},
+	})
+	if err == nil {
+		t.Error("NewHandler with colliding paths: error = nil, want error")
+	}
 }
 
 func TestHandlerAcceptsValidNotification(t *testing.T) {
@@ -150,17 +159,69 @@ func TestHandlerUnknownPath(t *testing.T) {
 	}
 }
 
-func TestHandlerHealthz(t *testing.T) {
+func TestHandlerHealthCheck(t *testing.T) {
 	h := newTestHandler(t, &mockNotifier{}, true)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, HealthPath, nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultHealthPath, nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	if body := rec.Body.String(); body != "ok" {
 		t.Errorf("body = %q, want %q", body, "ok")
+	}
+}
+
+func TestHandlerHealthPathDefaultsToHealth(t *testing.T) {
+	if DefaultHealthPath != "/health" {
+		t.Fatalf("DefaultHealthPath = %q, want /health", DefaultHealthPath)
+	}
+
+	h := newTestHandler(t, &mockNotifier{}, true)
+
+	// /healthz is no longer served: the Google frontend in front of Cloud Run
+	// can swallow it before it reaches the container.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status for /healthz = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandlerCustomHealthPath(t *testing.T) {
+	h, err := NewHandler(Options{
+		Secret:     testSecret,
+		HealthPath: "/healthz",
+		Notifier:   &mockNotifier{},
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status for the configured path = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultHealthPath, nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status for the default path = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandlerHealthPathRejectsNonGET(t *testing.T) {
+	h := newTestHandler(t, &mockNotifier{}, true)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultHealthPath, nil))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
 }
 

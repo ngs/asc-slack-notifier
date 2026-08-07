@@ -12,7 +12,8 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"ASC_WEBHOOK_SECRET", "SLACK_WEBHOOK_URL", "SLACK_BOT_TOKEN", "SLACK_CHANNEL",
-		"RUN_MODE", "AWS_LAMBDA_FUNCTION_NAME", "PORT", "WEBHOOK_PATH", "NOTIFY_PING", "LOG_LEVEL",
+		"RUN_MODE", "AWS_LAMBDA_FUNCTION_NAME", "PORT", "WEBHOOK_PATH", "HEALTH_PATH",
+		"NOTIFY_PING", "LOG_LEVEL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -35,6 +36,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.WebhookPath != "/webhook" {
 		t.Errorf("WebhookPath = %q, want /webhook", cfg.WebhookPath)
+	}
+	if cfg.HealthPath != "/health" {
+		t.Errorf("HealthPath = %q, want /health", cfg.HealthPath)
 	}
 	if !cfg.NotifyPing {
 		t.Error("NotifyPing = false, want true")
@@ -88,6 +92,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
 	t.Setenv("PORT", "9090")
 	t.Setenv("WEBHOOK_PATH", "asc")
+	t.Setenv("HEALTH_PATH", "healthz")
 	t.Setenv("NOTIFY_PING", "false")
 	t.Setenv("LOG_LEVEL", "debug")
 
@@ -100,6 +105,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.WebhookPath != "/asc" {
 		t.Errorf("WebhookPath = %q, want a leading slash to be added", cfg.WebhookPath)
+	}
+	if cfg.HealthPath != "/healthz" {
+		t.Errorf("HealthPath = %q, want a leading slash to be added", cfg.HealthPath)
 	}
 	if cfg.NotifyPing {
 		t.Error("NotifyPing = true, want false")
@@ -117,6 +125,18 @@ func TestLoadInvalidLogLevel(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load error = nil, want error")
+	}
+}
+
+func TestLoadRejectsCollidingPaths(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ASC_WEBHOOK_SECRET", "s3cret")
+	t.Setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
+	t.Setenv("WEBHOOK_PATH", "/hook")
+	t.Setenv("HEALTH_PATH", "/hook")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load error = nil, want an error for colliding paths")
 	}
 }
 
