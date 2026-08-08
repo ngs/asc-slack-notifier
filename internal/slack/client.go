@@ -89,7 +89,7 @@ func (c *Client) postIncomingWebhook(ctx context.Context, msg *Message) error {
 	if err != nil {
 		return fmt.Errorf("slack: post incoming webhook: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -117,7 +117,7 @@ func (c *Client) postChatMessage(ctx context.Context, msg *Message) error {
 	if err != nil {
 		return fmt.Errorf("slack: post chat.postMessage: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
