@@ -48,6 +48,9 @@ type Enrichment struct {
 	VersionString string
 	BuildNumber   string
 	Platform      string
+	// ASCLinkURL overrides the App Store Connect page the message links to. When
+	// empty the link is derived from AppID.
+	ASCLinkURL string
 }
 
 const (
@@ -155,11 +158,11 @@ func BuildMessage(p *webhook.Payload, e *Enrichment) *Message {
 		msg.Blocks = append(msg.Blocks, Block{Type: blockSection, Fields: fields})
 	}
 
-	if e != nil && e.AppID != "" {
+	if link := appStoreConnectLink(e); link != "" {
 		msg.Blocks = append(msg.Blocks, Block{Type: blockActions, Elements: []any{Button{
 			Type: elementButton,
 			Text: Text{Type: textPlain, Text: "Open in App Store Connect"},
-			URL:  fmt.Sprintf(appStoreConnectAppURL, e.AppID),
+			URL:  link,
 		}}})
 	}
 
@@ -175,6 +178,20 @@ func BuildMessage(p *webhook.Payload, e *Enrichment) *Message {
 			orDash(p.Data.Attributes.OldValue()), orDash(p.Data.Attributes.NewValue()))
 	}
 	return msg
+}
+
+// appStoreConnectLink returns the URL the message's button opens, or an empty
+// string when the enrichment knows of no page to link to.
+func appStoreConnectLink(e *Enrichment) string {
+	switch {
+	case e == nil:
+		return ""
+	case e.ASCLinkURL != "":
+		return e.ASCLinkURL
+	case e.AppID != "":
+		return fmt.Sprintf(appStoreConnectAppURL, e.AppID)
+	}
+	return ""
 }
 
 // subjectSuffix names the app and version the event is about, for the fallback
@@ -245,6 +262,8 @@ func buildFields(p *webhook.Payload, e *Enrichment) []Text {
 	if p.Data.IsStateUpdate() {
 		skip["oldValue"] = true
 		skip["newValue"] = true
+		skip["oldState"] = true
+		skip["newState"] = true
 	}
 	for _, k := range attrs.SortedKeys() {
 		if skip[k] {

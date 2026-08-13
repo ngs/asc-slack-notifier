@@ -103,11 +103,24 @@ func (p *Payload) IsPing() bool {
 	return strings.Contains(strings.ToLower(p.Data.Type), "ping")
 }
 
-// OldValue returns the previous state of a state-update event.
-func (a Attributes) OldValue() string { return a.String("oldValue") }
+// OldValue returns the previous state of a state-update event. App Store
+// Connect spells the attribute `oldValue` for some event types and `oldState`
+// for others, for example buildUploadStateUpdated.
+func (a Attributes) OldValue() string { return a.firstString("oldValue", "oldState") }
 
-// NewValue returns the new state of a state-update event.
-func (a Attributes) NewValue() string { return a.String("newValue") }
+// NewValue returns the new state of a state-update event, accepting both the
+// `newValue` and `newState` spellings.
+func (a Attributes) NewValue() string { return a.firstString("newValue", "newState") }
+
+// firstString returns the first key that renders as a non-empty string.
+func (a Attributes) firstString(keys ...string) string {
+	for _, k := range keys {
+		if v := a.String(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // Timestamp returns the event timestamp as sent by App Store Connect.
 func (a Attributes) Timestamp() string { return a.String("timestamp") }

@@ -100,26 +100,16 @@ type versionResponse struct {
 	} `json:"included"`
 }
 
-// AppStoreVersionInfo fetches the app, version and build of an appStoreVersions
-// resource.
-func (c *Client) AppStoreVersionInfo(ctx context.Context, versionID string) (*VersionInfo, error) {
-	if versionID == "" {
-		return nil, fmt.Errorf("asc: version ID is required")
-	}
-
+// get issues an authenticated GET against path and returns the response body.
+// A non-2xx status is an error carrying the beginning of the body, which is
+// where the App Store Connect API puts its error details.
+func (c *Client) get(ctx context.Context, path string, q url.Values) ([]byte, error) {
 	token, err := c.tokens.Token(c.now())
 	if err != nil {
 		return nil, err
 	}
 
-	q := url.Values{}
-	q.Set("include", "app,build")
-	q.Set("fields[appStoreVersions]", "versionString,platform")
-	q.Set("fields[apps]", "name,bundleId")
-	q.Set("fields[builds]", "version")
-	endpoint := fmt.Sprintf("%s/v1/appStoreVersions/%s?%s",
-		c.baseURL, url.PathEscape(versionID), q.Encode())
-
+	endpoint := fmt.Sprintf("%s%s?%s", c.baseURL, path, q.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("asc: build request: %w", err)
@@ -129,7 +119,7 @@ func (c *Client) AppStoreVersionInfo(ctx context.Context, versionID string) (*Ve
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("asc: get appStoreVersion: %w", err)
+		return nil, fmt.Errorf("asc: get %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -138,8 +128,28 @@ func (c *Client) AppStoreVersionInfo(ctx context.Context, versionID string) (*Ve
 		return nil, fmt.Errorf("asc: read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("asc: appStoreVersions returned %d: %s",
-			resp.StatusCode, bytes.TrimSpace(body[:min(len(body), 512)]))
+		return nil, fmt.Errorf("asc: %s returned %d: %s",
+			path, resp.StatusCode, bytes.TrimSpace(body[:min(len(body), 512)]))
+	}
+	return body, nil
+}
+
+// AppStoreVersionInfo fetches the app, version and build of an appStoreVersions
+// resource.
+func (c *Client) AppStoreVersionInfo(ctx context.Context, versionID string) (*VersionInfo, error) {
+	if versionID == "" {
+		return nil, fmt.Errorf("asc: version ID is required")
+	}
+
+	q := url.Values{}
+	q.Set("include", "app,build")
+	q.Set("fields[appStoreVersions]", "versionString,platform")
+	q.Set("fields[apps]", "name,bundleId")
+	q.Set("fields[builds]", "version")
+
+	body, err := c.get(ctx, "/v1/appStoreVersions/"+url.PathEscape(versionID), q)
+	if err != nil {
+		return nil, err
 	}
 
 	var parsed versionResponse
@@ -164,6 +174,78 @@ func (c *Client) AppStoreVersionInfo(ctx context.Context, versionID string) (*Ve
 			}
 		case "builds":
 			info.BuildNumber = inc.Attributes.Version
+		}
+	}
+	return info, nil
+}
+
+// buildResponse models the subset of a builds resource this client reads. The
+// build number lives on the resource itself, the marketing version on the
+// included preReleaseVersions entry.
+type buildResponse struct {
+	Data struct {
+		Attributes struct {
+			Version string `json:"version"`
+		} `json:"attributes"`
+		Relationships struct {
+			App struct {
+				Data *struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			} `json:"app"`
+		} `json:"relationships"`
+	} `json:"data"`
+	Included []struct {
+		Type       string `json:"type"`
+		ID         string `json:"id"`
+		Attributes struct {
+			Name     string `json:"name"`
+			BundleID string `json:"bundleId"`
+			Version  string `json:"version"`
+			Platform string `json:"platform"`
+		} `json:"attributes"`
+	} `json:"included"`
+}
+
+// BuildInfo fetches the app, version and build number of a builds resource. A
+// buildUploads resource shares its ID with the build it produced, so the same
+// lookup answers for both.
+func (c *Client) BuildInfo(ctx context.Context, buildID string) (*VersionInfo, error) {
+	if buildID == "" {
+		return nil, fmt.Errorf("asc: build ID is required")
+	}
+
+	q := url.Values{}
+	q.Set("include", "app,preReleaseVersion")
+	q.Set("fields[builds]", "version")
+	q.Set("fields[apps]", "name,bundleId")
+	q.Set("fields[preReleaseVersions]", "version,platform")
+
+	body, err := c.get(ctx, "/v1/builds/"+url.PathEscape(buildID), q)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed buildResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("asc: decode response: %w", err)
+	}
+
+	info := &VersionInfo{BuildNumber: parsed.Data.Attributes.Version}
+	if app := parsed.Data.Relationships.App.Data; app != nil {
+		info.AppID = app.ID
+	}
+	for _, inc := range parsed.Included {
+		switch inc.Type {
+		case "apps":
+			info.AppName = inc.Attributes.Name
+			info.BundleID = inc.Attributes.BundleID
+			if info.AppID == "" {
+				info.AppID = inc.ID
+			}
+		case "preReleaseVersions":
+			info.VersionString = inc.Attributes.Version
+			info.Platform = inc.Attributes.Platform
 		}
 	}
 	return info, nil

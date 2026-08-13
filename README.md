@@ -17,8 +17,8 @@ by an environment variable.
 - Event types Apple has not documented yet are still delivered, using a generic
   key/value rendering — notifications are never silently dropped.
 - Optional App Store Connect API enrichment: with an API key configured, version
-  state notifications name the app, version and build number and carry an
-  "Open in App Store Connect" button instead of a bare UUID.
+  state and build upload notifications name the app, version and build number
+  and carry an "Open in App Store Connect" button instead of a bare UUID.
 - Slack destination is either an Incoming Webhook URL or a bot token plus
   channel (`chat.postMessage`).
 - Returns `502` when Slack cannot be reached, so App Store Connect redelivers.
@@ -91,12 +91,17 @@ copies drift apart, every delivery is rejected with `401`.
 
 ### App Store Connect API enrichment (optional)
 
-A webhook payload identifies the app version it is about by a bare UUID and
-nothing else, so an `appStoreVersionAppVersionStateUpdated` notification cannot
-say which app or version moved. Configure an App Store Connect API key and the
-service looks the version up before posting, adding **App**, **Version** and
+A webhook payload identifies the resource it is about by a bare UUID and nothing
+else, so an `appStoreVersionAppVersionStateUpdated` notification cannot say
+which app or version moved. Configure an App Store Connect API key and the
+service looks the resource up before posting, adding **App**, **Version** and
 **Build** fields plus an **Open in App Store Connect** button that jumps
 straight to the app's distribution page.
+
+Build upload and build state notifications (`buildUploadStateUpdated`,
+`buildBetaDetailExternalBuildStateUpdated`) are enriched the same way, from the
+build itself: the app, the pre-release version, the build number, and a button
+opening the app's TestFlight page.
 
 Create the key in App Store Connect → **Users and Access** → **Integrations** →
 **App Store Connect API**. The `Developer` or `App Manager` role is enough — the

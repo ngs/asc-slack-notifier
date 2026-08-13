@@ -22,11 +22,16 @@ const defaultAPIBaseURL = "https://slack.com/api"
 // Enricher fetches supplemental data for an event's related resource.
 type Enricher interface {
 	EnrichAppStoreVersion(ctx context.Context, versionID string) (*Enrichment, error)
+	EnrichBuild(ctx context.Context, buildID string) (*Enrichment, error)
 }
 
-// instanceTypeAppStoreVersions is the relationship type carrying an App Store
-// version, the only resource this service enriches.
-const instanceTypeAppStoreVersions = "appStoreVersions"
+// The relationship types this service enriches. A buildUploads resource shares
+// its ID with the build it produced, so both resolve through the same lookup.
+const (
+	instanceTypeAppStoreVersions = "appStoreVersions"
+	instanceTypeBuildUploads     = "buildUploads"
+	instanceTypeBuilds           = "builds"
+)
 
 // Options configures a Client. WebhookURL takes precedence when both an
 // Incoming Webhook URL and a bot token are provided.
@@ -96,13 +101,24 @@ func (c *Client) enrich(ctx context.Context, p *webhook.Payload) *Enrichment {
 		return nil
 	}
 	inst := p.Data.Instance()
-	if inst == nil || inst.Type != instanceTypeAppStoreVersions || inst.ID == "" {
+	if inst == nil || inst.ID == "" {
 		return nil
 	}
-	e, err := c.enricher.EnrichAppStoreVersion(ctx, inst.ID)
+
+	var e *Enrichment
+	var err error
+	switch inst.Type {
+	case instanceTypeAppStoreVersions:
+		e, err = c.enricher.EnrichAppStoreVersion(ctx, inst.ID)
+	case instanceTypeBuildUploads, instanceTypeBuilds:
+		e, err = c.enricher.EnrichBuild(ctx, inst.ID)
+	default:
+		return nil
+	}
 	if err != nil {
 		c.logger.Warn("App Store Connect enrichment failed",
-			slog.String("version_id", inst.ID), slog.Any("error", err))
+			slog.String("instance_type", inst.Type),
+			slog.String("instance_id", inst.ID), slog.Any("error", err))
 		return nil
 	}
 	return e

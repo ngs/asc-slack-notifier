@@ -92,19 +92,58 @@ func main() {
 type ascEnricher struct{ client *asc.Client }
 
 // EnrichAppStoreVersion looks up the app, version and build of an App Store
-// version resource.
+// version resource. The message links to the app's distribution page, so no
+// explicit link is set.
 func (a *ascEnricher) EnrichAppStoreVersion(ctx context.Context, id string) (*slack.Enrichment, error) {
 	info, err := a.client.AppStoreVersionInfo(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	return enrichmentOf(info, ""), nil
+}
+
+// EnrichBuild looks up the app, pre-release version and build number of a build
+// (or build upload) resource, linking to the app's TestFlight page.
+func (a *ascEnricher) EnrichBuild(ctx context.Context, id string) (*slack.Enrichment, error) {
+	info, err := a.client.BuildInfo(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return enrichmentOf(info, testFlightURL(info.AppID, info.Platform)), nil
+}
+
+func enrichmentOf(info *asc.VersionInfo, linkURL string) *slack.Enrichment {
 	return &slack.Enrichment{
 		AppID:         info.AppID,
 		AppName:       info.AppName,
 		VersionString: info.VersionString,
 		BuildNumber:   info.BuildNumber,
 		Platform:      info.Platform,
-	}, nil
+		ASCLinkURL:    linkURL,
+	}
+}
+
+// testFlightPaths maps App Store Connect platform values to the segment their
+// TestFlight page lives under.
+var testFlightPaths = map[string]string{
+	"IOS":       "ios",
+	"MAC_OS":    "macos",
+	"TV_OS":     "tvos",
+	"VISION_OS": "visionos",
+}
+
+// testFlightURL builds the TestFlight page URL of an app. An unknown platform
+// yields the platform-less page, which App Store Connect resolves itself; with
+// no app ID there is nothing to link to.
+func testFlightURL(appID, platform string) string {
+	if appID == "" {
+		return ""
+	}
+	base := "https://appstoreconnect.apple.com/apps/" + appID + "/testflight"
+	if p, ok := testFlightPaths[platform]; ok {
+		return base + "/" + p
+	}
+	return base
 }
 
 // serveHTTP runs the handler as a normal HTTP server and shuts it down

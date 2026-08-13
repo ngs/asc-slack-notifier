@@ -176,23 +176,34 @@ Use Block Kit. Common format:
 ## App Store Connect API enrichment (optional)
 
 A webhook payload names the resource an event is about only as
-`relationships.instance.data = {type: "appStoreVersions", id: <uuid>}`, so the
-app, version string and build number have to be fetched from the App Store
-Connect API.
+`relationships.instance.data = {type: "appStoreVersions", id: <uuid>}` — or
+`{type: "buildUploads", …}` for a build upload — so the app, version string and
+build number have to be fetched from the App Store Connect API.
 
 - `internal/asc` is a minimal client for that API. It signs an ES256 JWT with
   the stdlib (`crypto/ecdsa`, `crypto/x509`, `encoding/pem`) — no JWT library —
   caching the token until a minute before its ten-minute expiry, and issues
   `GET /v1/appStoreVersions/{id}?include=app,build` with the field sets narrowed
   to what is rendered. Both PKCS#8 (Apple's `.p8`) and SEC1 private keys parse.
-- `slack.Enricher` is the seam: `slack.Client` calls it only for an
-  `appStoreVersions` instance, and `cmd/asc-slack-notifier` adapts `asc.Client`
-  to it. Every field is best effort — a version with no binary attached has no
-  build, which yields an empty string rather than an error.
+- A second lookup, `GET /v1/builds/{id}?include=app,preReleaseVersion`, covers
+  build events. A `buildUploads` resource has no `app` relationship of its own,
+  but **its ID is the ID of the build it produced**, so the build endpoint
+  resolves a `buildUploads` instance directly — no intermediate request. The
+  build number is `data.attributes.version`; the marketing version and platform
+  come from the included `preReleaseVersions` entry, and the app from the
+  included `apps` entry (the `app` relationship data is often null).
+- `slack.Enricher` is the seam: `slack.Client` calls `EnrichAppStoreVersion` for
+  an `appStoreVersions` instance and `EnrichBuild` for a `buildUploads` or
+  `builds` instance, and `cmd/asc-slack-notifier` adapts `asc.Client` to it.
+  Every field is best effort — a version with no binary attached has no build,
+  which yields an empty string rather than an error.
 - An enriched message leads with `App`, `Version` and `Build` fields, drops the
   raw instance UUID field, and gains an actions block with an "Open in App Store
   Connect" button linking to
-  `https://appstoreconnect.apple.com/apps/{appId}/distribution`. The fallback
+  `https://appstoreconnect.apple.com/apps/{appId}/distribution`, or, for build
+  events, to `.../apps/{appId}/testflight/{platform}` (`IOS` → `ios`, `MAC_OS` →
+  `macos`, `TV_OS` → `tvos`, `VISION_OS` → `visionos`; an unknown platform drops
+  the segment). The fallback
   text names the app and version too, so notifications and channel lists are
   readable without opening the message.
 - Enrichment never blocks a notification: a lookup failure is logged at warn

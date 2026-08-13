@@ -270,6 +270,64 @@ func TestBuildMessagePartialEnrichment(t *testing.T) {
 	})
 }
 
+func TestBuildMessageASCLinkURL(t *testing.T) {
+	msg := BuildMessage(mustParse(t, stateUpdateBody), &Enrichment{
+		AppID:      "1234567890",
+		AppName:    "MyApp",
+		ASCLinkURL: "https://appstoreconnect.apple.com/apps/1234567890/testflight/ios",
+	})
+
+	actions := blockOfType(msg, blockActions)
+	if actions == nil {
+		t.Fatalf("no actions block in %+v", msg.Blocks)
+	}
+	btn, ok := actions.Elements[0].(Button)
+	if !ok {
+		t.Fatalf("actions element = %T, want a Button", actions.Elements[0])
+	}
+	if btn.URL != "https://appstoreconnect.apple.com/apps/1234567890/testflight/ios" {
+		t.Errorf("button URL = %q, want the explicit link", btn.URL)
+	}
+}
+
+func TestBuildMessageASCLinkURLWithoutAppID(t *testing.T) {
+	msg := BuildMessage(mustParse(t, stateUpdateBody), &Enrichment{
+		AppName:    "MyApp",
+		ASCLinkURL: "https://appstoreconnect.apple.com/apps/1234567890/testflight",
+	})
+	if b := blockOfType(msg, blockActions); b == nil {
+		t.Error("no actions block, want one built from the explicit link")
+	}
+}
+
+// buildUploadBody is the payload App Store Connect delivers for a build upload,
+// spelling the transition oldState/newState.
+const buildUploadBody = `{"data":{"type":"buildUploadStateUpdated","id":"46f2576e",
+  "version":1,
+  "attributes":{"oldState":"PROCESSING","newState":"COMPLETE"},
+  "relationships":{"instance":{"data":{"type":"buildUploads","id":"e59c1dca"}}}}}`
+
+func TestBuildMessageStateSpelling(t *testing.T) {
+	msg := BuildMessage(mustParse(t, buildUploadBody), nil)
+
+	if header := msg.Blocks[0].Text.Text; !strings.HasPrefix(header, "✅") {
+		t.Errorf("header = %q, want the COMPLETE emoji prefix", header)
+	}
+	if !strings.Contains(msg.Text, "PROCESSING") || !strings.Contains(msg.Text, "COMPLETE") {
+		t.Errorf("fallback text = %q, want the state transition", msg.Text)
+	}
+
+	rendered := renderBlocks(msg)
+	if !strings.Contains(rendered, "*Status*\n`PROCESSING` → `COMPLETE`") {
+		t.Errorf("rendered message missing the status field:\n%s", rendered)
+	}
+	for _, unwanted := range []string{"Old State", "New State"} {
+		if strings.Contains(rendered, unwanted) {
+			t.Errorf("rendered message repeats the transition as %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
 func sectionBlock(t *testing.T, msg *Message) *Block {
 	t.Helper()
 	b := blockOfType(msg, blockSection)

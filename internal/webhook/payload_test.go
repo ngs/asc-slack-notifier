@@ -66,6 +66,41 @@ func TestParseNotification(t *testing.T) {
 	}
 }
 
+func TestOldNewStateSpelling(t *testing.T) {
+	body := `{"data":{"type":"buildUploadStateUpdated","id":"46f2576e","version":1,
+	  "attributes":{"oldState":"PROCESSING","newState":"COMPLETE"},
+	  "relationships":{"instance":{"data":{"type":"buildUploads","id":"e59c1dca"}}}}}`
+	p, err := Parse([]byte(body))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := p.Data.Attributes.OldValue(); got != "PROCESSING" {
+		t.Errorf("OldValue = %q, want the oldState fallback", got)
+	}
+	if got := p.Data.Attributes.NewValue(); got != "COMPLETE" {
+		t.Errorf("NewValue = %q, want the newState fallback", got)
+	}
+	if !p.Data.IsStateUpdate() {
+		t.Error("IsStateUpdate = false, want true")
+	}
+}
+
+func TestOldNewValueWinsOverState(t *testing.T) {
+	body := `{"data":{"type":"buildUploadStateUpdated","id":"1",
+	  "attributes":{"oldValue":"UPLOADED","newValue":"VALID",
+	  "oldState":"PROCESSING","newState":"COMPLETE"}}}`
+	p, err := Parse([]byte(body))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := p.Data.Attributes.OldValue(); got != "UPLOADED" {
+		t.Errorf("OldValue = %q, want oldValue to win", got)
+	}
+	if got := p.Data.Attributes.NewValue(); got != "VALID" {
+		t.Errorf("NewValue = %q, want newValue to win", got)
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	tests := []struct {
 		name string

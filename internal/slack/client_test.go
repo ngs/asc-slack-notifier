@@ -148,16 +148,26 @@ func TestPostChatMessageAPIError(t *testing.T) {
 	}
 }
 
-// fakeEnricher records the version ID it was asked about and returns a canned
+// fakeEnricher records the resource IDs it was asked about and returns a canned
 // result, or an error when one is set.
 type fakeEnricher struct {
-	calls  []string
-	result *Enrichment
-	err    error
+	calls      []string
+	buildCalls []string
+	result     *Enrichment
+	err        error
 }
 
 func (f *fakeEnricher) EnrichAppStoreVersion(_ context.Context, versionID string) (*Enrichment, error) {
 	f.calls = append(f.calls, versionID)
+	return f.enrichment()
+}
+
+func (f *fakeEnricher) EnrichBuild(_ context.Context, buildID string) (*Enrichment, error) {
+	f.buildCalls = append(f.buildCalls, buildID)
+	return f.enrichment()
+}
+
+func (f *fakeEnricher) enrichment() (*Enrichment, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -229,16 +239,68 @@ func TestNotifyContinuesWhenEnrichmentFails(t *testing.T) {
 	}
 }
 
-func TestNotifySkipsEnrichmentForOtherResources(t *testing.T) {
+// buildUploadEvent is the shape App Store Connect delivers for a build upload:
+// the state pair is spelled oldState/newState and the instance is a buildUploads
+// resource whose ID is also the build's.
+const buildUploadEvent = `{"data":{"type":"buildUploadStateUpdated","id":"46f2576e",
+  "version":1,
+  "attributes":{"oldState":"PROCESSING","newState":"COMPLETE"},
+  "relationships":{"instance":{"data":{"type":"buildUploads","id":"e59c1dca-0af1-4df1-9cb4-054d62c569e5"}}}}}`
+
+func TestNotifyEnrichesBuildUploads(t *testing.T) {
+	enricher := &fakeEnricher{result: &Enrichment{
+		AppID: "6757988472", AppName: "MyApp", VersionString: "1.1.0",
+		BuildNumber: "31661572690", Platform: "IOS",
+		ASCLinkURL: "https://appstoreconnect.apple.com/apps/6757988472/testflight/ios",
+	}}
+
+	sent := notifyWithEnricher(t, enricher, buildUploadEvent)
+
+	if len(enricher.buildCalls) != 1 || enricher.buildCalls[0] != "e59c1dca-0af1-4df1-9cb4-054d62c569e5" {
+		t.Fatalf("build enricher calls = %v, want one call for the instance ID", enricher.buildCalls)
+	}
+	if len(enricher.calls) != 0 {
+		t.Errorf("appStoreVersion enricher called for a build upload: %v", enricher.calls)
+	}
+	for _, want := range []string{
+		"*App*", "MyApp", "1.1.0", "31661572690",
+		"PROCESSING", "COMPLETE",
+		"https://appstoreconnect.apple.com/apps/6757988472/testflight/ios",
+	} {
+		if !strings.Contains(sent, want) {
+			t.Errorf("posted message missing %q:\n%s", want, sent)
+		}
+	}
+	if strings.Contains(sent, "e59c1dca-0af1-4df1-9cb4-054d62c569e5") {
+		t.Errorf("enriched message still shows the raw instance UUID:\n%s", sent)
+	}
+}
+
+func TestNotifyEnrichesBuilds(t *testing.T) {
 	enricher := &fakeEnricher{result: &Enrichment{AppID: "1234567890", AppName: "MyApp"}}
 
-	body := `{"data":{"type":"buildUploadStateUpdated","id":"1",
+	body := `{"data":{"type":"buildBetaDetailExternalBuildStateUpdated","id":"1",
 	  "attributes":{"oldValue":"PROCESSING","newValue":"COMPLETE"},
 	  "relationships":{"instance":{"data":{"type":"builds","id":"b1"}}}}}`
 	sent := notifyWithEnricher(t, enricher, body)
 
-	if len(enricher.calls) != 0 {
-		t.Errorf("enricher called for a non-appStoreVersions instance: %v", enricher.calls)
+	if len(enricher.buildCalls) != 1 || enricher.buildCalls[0] != "b1" {
+		t.Fatalf("build enricher calls = %v, want one call for b1", enricher.buildCalls)
+	}
+	if !strings.Contains(sent, "MyApp") {
+		t.Errorf("message missing the enrichment data:\n%s", sent)
+	}
+}
+
+func TestNotifySkipsEnrichmentForOtherResources(t *testing.T) {
+	enricher := &fakeEnricher{result: &Enrichment{AppID: "1234567890", AppName: "MyApp"}}
+
+	body := `{"data":{"type":"betaFeedbackCrashSubmissionCreated","id":"1",
+	  "relationships":{"instance":{"data":{"type":"betaFeedbackCrashSubmissions","id":"x1"}}}}}`
+	sent := notifyWithEnricher(t, enricher, body)
+
+	if len(enricher.calls) != 0 || len(enricher.buildCalls) != 0 {
+		t.Errorf("enricher called for an unsupported instance: %v %v", enricher.calls, enricher.buildCalls)
 	}
 	if strings.Contains(sent, "MyApp") {
 		t.Errorf("message carries enrichment data it should not have:\n%s", sent)
