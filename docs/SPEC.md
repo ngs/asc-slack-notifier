@@ -95,8 +95,15 @@ Mode resolution (`RUN_MODE` env var):
 | `HEALTH_PATH` | – | Health check path. Default `/health`. Not `/healthz`: the Google frontend in front of Cloud Run can intercept that path before it reaches the container |
 | `NOTIFY_PING` | – | `false` suppresses Slack messages for pings. Default `true` |
 | `LOG_LEVEL` | – | `debug`/`info`/`warn`/`error` via `log/slog`. Default `info` |
+| `ASC_API_KEY_ID` | – | App Store Connect API key ID (`kid`). Presence enables enrichment |
+| `ASC_API_ISSUER_ID` | – | App Store Connect API issuer ID (`iss`) |
+| `ASC_API_PRIVATE_KEY` | – | PEM contents of the API key, plain or base64-encoded (auto-detected by the PEM armor). Literal `\n` sequences in a plain value are expanded to newlines |
+| `ASC_API_PRIVATE_KEY_PATH` | – | Path to the `.p8` file, read at startup. `ASC_API_PRIVATE_KEY` wins if both are set |
 
 Fatal at startup if no Slack destination is configured.
+
+The four `ASC_API_*` variables form a group: none set disables enrichment, a
+partial set is fatal at startup rather than a silent downgrade.
 
 ## Package layout
 
@@ -115,6 +122,11 @@ Fatal at startup if no Slack destination is configured.
 │   ├── client.go                    # Incoming Webhook & chat.postMessage
 │   ├── message.go                   # event → Block Kit formatting
 │   └── message_test.go
+├── internal/asc/
+│   ├── client.go                    # App Store Connect API (optional enrichment)
+│   ├── token.go                     # ES256 JWT minting with the stdlib
+│   ├── client_test.go
+│   └── token_test.go
 ├── Dockerfile                       # multi-stage, distroless/scratch, non-root
 ├── Makefile                         # build / test / lint / docker-build / lambda-zip
 ├── .github/workflows/ci.yml         # go test + go vet (golangci-lint optional)
@@ -160,6 +172,32 @@ Use Block Kit. Common format:
 - No need for a case per event type: two generic formatters — "state updated"
   (has old/new) and "created" — plus the unknown-type fallback are enough.
   Title-case the lowerCamelCase `data.type` for the header.
+
+## App Store Connect API enrichment (optional)
+
+A webhook payload names the resource an event is about only as
+`relationships.instance.data = {type: "appStoreVersions", id: <uuid>}`, so the
+app, version string and build number have to be fetched from the App Store
+Connect API.
+
+- `internal/asc` is a minimal client for that API. It signs an ES256 JWT with
+  the stdlib (`crypto/ecdsa`, `crypto/x509`, `encoding/pem`) — no JWT library —
+  caching the token until a minute before its ten-minute expiry, and issues
+  `GET /v1/appStoreVersions/{id}?include=app,build` with the field sets narrowed
+  to what is rendered. Both PKCS#8 (Apple's `.p8`) and SEC1 private keys parse.
+- `slack.Enricher` is the seam: `slack.Client` calls it only for an
+  `appStoreVersions` instance, and `cmd/asc-slack-notifier` adapts `asc.Client`
+  to it. Every field is best effort — a version with no binary attached has no
+  build, which yields an empty string rather than an error.
+- An enriched message leads with `App`, `Version` and `Build` fields, drops the
+  raw instance UUID field, and gains an actions block with an "Open in App Store
+  Connect" button linking to
+  `https://appstoreconnect.apple.com/apps/{appId}/distribution`. The fallback
+  text names the app and version too, so notifications and channel lists are
+  readable without opening the message.
+- Enrichment never blocks a notification: a lookup failure is logged at warn
+  level and the message is posted from the payload alone. With no credentials
+  configured the rendering is identical to a build without this feature.
 
 ## Tests & acceptance criteria
 

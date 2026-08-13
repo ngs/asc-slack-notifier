@@ -42,6 +42,9 @@ section of the README for their meaning.
 | `HEALTH_PATH` | variable | no | Health check path. Defaults to `/health` |
 | `NOTIFY_PING` | variable | no | `false` acknowledges pings without notifying Slack |
 | `LOG_LEVEL` | variable | no | `debug`, `info`, `warn` or `error` |
+| `ASC_API_KEY_ID` | variable | no | App Store Connect API key ID; enables message enrichment |
+| `ASC_API_ISSUER_ID` | variable | no | App Store Connect API issuer ID |
+| `ASC_API_PRIVATE_KEY` | secret | no | The `.p8` key, PEM or base64-encoded (`base64 -i AuthKey_XXXX.p8`) |
 
 The deploy job fails early when `ASC_WEBHOOK_SECRET` is missing, or when neither
 `SLACK_WEBHOOK_URL` nor the `SLACK_BOT_TOKEN` + `SLACK_CHANNEL` pair is set.

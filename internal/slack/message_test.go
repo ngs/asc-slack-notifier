@@ -63,7 +63,7 @@ func TestBuildMessageStateUpdate(t *testing.T) {
 	  "timestamp":"2025-04-16T05:00:52.745Z"},
 	  "relationships":{"instance":{"data":{"type":"appStoreVersions","id":"ad7e6298"}}}}}`
 
-	msg := BuildMessage(mustParse(t, body))
+	msg := BuildMessage(mustParse(t, body), nil)
 
 	if len(msg.Blocks) == 0 || msg.Blocks[0].Type != blockHeader {
 		t.Fatalf("first block = %+v, want a header block", msg.Blocks)
@@ -99,7 +99,7 @@ func TestBuildMessageCreatedEvent(t *testing.T) {
 	  "attributes":{"timestamp":"2025-04-16T05:00:52.745Z"},
 	  "relationships":{"instance":{"data":{"type":"betaFeedbackCrashSubmissions","id":"xyz"}}}}}`
 
-	msg := BuildMessage(mustParse(t, body))
+	msg := BuildMessage(mustParse(t, body), nil)
 
 	if got := msg.Blocks[0].Text.Text; !strings.Contains(got, "Beta Feedback Crash Submission Created") {
 		t.Errorf("header = %q", got)
@@ -116,7 +116,7 @@ func TestBuildMessageUnknownType(t *testing.T) {
 	body := `{"data":{"type":"somethingBrandNewCreated","id":"1",
 	  "attributes":{"count":3,"name":"widget"}}}`
 
-	msg := BuildMessage(mustParse(t, body))
+	msg := BuildMessage(mustParse(t, body), nil)
 
 	if got := msg.Blocks[0].Text.Text; !strings.Contains(got, "Something Brand New Created") {
 		t.Errorf("header = %q", got)
@@ -130,7 +130,7 @@ func TestBuildMessageUnknownType(t *testing.T) {
 }
 
 func TestBuildMessagePing(t *testing.T) {
-	msg := BuildMessage(mustParse(t, `{"data":{"type":"webhookPing","id":"1"}}`))
+	msg := BuildMessage(mustParse(t, `{"data":{"type":"webhookPing","id":"1"}}`), nil)
 
 	if !strings.Contains(msg.Text, "ping") {
 		t.Errorf("text = %q, want a ping acknowledgement", msg.Text)
@@ -144,7 +144,7 @@ func TestBuildMessagePing(t *testing.T) {
 
 func TestBuildMessageIsValidJSON(t *testing.T) {
 	msg := BuildMessage(mustParse(t, `{"data":{"type":"buildUploadStateUpdated","id":"1",
-	  "attributes":{"oldValue":"PROCESSING","newValue":"COMPLETE"}}}`))
+	  "attributes":{"oldValue":"PROCESSING","newValue":"COMPLETE"}}}`), nil)
 
 	b, err := json.Marshal(msg)
 	if err != nil {
@@ -170,12 +170,122 @@ func TestBuildMessageCapsFieldCount(t *testing.T) {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 
-	msg := BuildMessage(mustParse(t, string(body)))
+	msg := BuildMessage(mustParse(t, string(body)), nil)
 	for _, b := range msg.Blocks {
 		if b.Type == blockSection && len(b.Fields) > 10 {
 			t.Fatalf("section has %d fields, want at most 10", len(b.Fields))
 		}
 	}
+}
+
+// stateUpdateBody is an appStoreVersion state update referring to a version by
+// its bare UUID, the shape App Store Connect actually delivers.
+const stateUpdateBody = `{"data":{"type":"appStoreVersionAppVersionStateUpdated","id":"7c813492",
+  "attributes":{"newValue":"READY_FOR_DISTRIBUTION","oldValue":"IN_REVIEW",
+  "timestamp":"2025-04-16T05:00:52.745Z"},
+  "relationships":{"instance":{"data":{"type":"appStoreVersions","id":"ad7e6298"}}}}}`
+
+func TestBuildMessageWithEnrichment(t *testing.T) {
+	msg := BuildMessage(mustParse(t, stateUpdateBody), &Enrichment{
+		AppID:         "1234567890",
+		AppName:       "MyApp",
+		VersionString: "2.3.1",
+		BuildNumber:   "123",
+		Platform:      "IOS",
+	})
+
+	section := sectionBlock(t, msg)
+	wantLeading := []string{"*App*\nMyApp", "*Version*\n2.3.1", "*Build*\n123"}
+	for i, want := range wantLeading {
+		if got := section.Fields[i].Text; got != want {
+			t.Errorf("field %d = %q, want %q", i, got, want)
+		}
+	}
+	if got := section.Fields[len(wantLeading)].Text; !strings.HasPrefix(got, "*Status*") {
+		t.Errorf("field after the enrichment fields = %q, want the status field", got)
+	}
+
+	rendered := renderBlocks(msg)
+	if strings.Contains(rendered, "ad7e6298") {
+		t.Errorf("enriched message still shows the raw instance UUID:\n%s", rendered)
+	}
+
+	actions := blockOfType(msg, blockActions)
+	if actions == nil {
+		t.Fatalf("no actions block in %+v", msg.Blocks)
+	}
+	btn, ok := actions.Elements[0].(Button)
+	if !ok {
+		t.Fatalf("actions element = %T, want a Button", actions.Elements[0])
+	}
+	if btn.URL != "https://appstoreconnect.apple.com/apps/1234567890/distribution" {
+		t.Errorf("button URL = %q", btn.URL)
+	}
+	if btn.Text.Text != "Open in App Store Connect" {
+		t.Errorf("button label = %q", btn.Text.Text)
+	}
+
+	if !strings.Contains(msg.Text, "MyApp") || !strings.Contains(msg.Text, "2.3.1") {
+		t.Errorf("fallback text = %q, want the app name and version", msg.Text)
+	}
+	if !strings.Contains(msg.Text, "IN_REVIEW") || !strings.Contains(msg.Text, "READY_FOR_DISTRIBUTION") {
+		t.Errorf("fallback text = %q, want the state transition", msg.Text)
+	}
+
+	// The actions block sits between the fields and the context line.
+	var order []string
+	for _, b := range msg.Blocks {
+		order = append(order, b.Type)
+	}
+	want := []string{blockHeader, blockSection, blockActions, blockContext}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Errorf("block order = %v, want %v", order, want)
+	}
+}
+
+func TestBuildMessagePartialEnrichment(t *testing.T) {
+	t.Run("no build number", func(t *testing.T) {
+		msg := BuildMessage(mustParse(t, stateUpdateBody), &Enrichment{
+			AppID: "1234567890", AppName: "MyApp", VersionString: "2.3.1",
+		})
+		if rendered := renderBlocks(msg); strings.Contains(rendered, "*Build*") {
+			t.Errorf("rendered a Build field for an empty build number:\n%s", rendered)
+		}
+	})
+
+	t.Run("no app id", func(t *testing.T) {
+		msg := BuildMessage(mustParse(t, stateUpdateBody), &Enrichment{
+			AppName: "MyApp", VersionString: "2.3.1",
+		})
+		if b := blockOfType(msg, blockActions); b != nil {
+			t.Errorf("rendered an actions block without an app ID: %+v", b)
+		}
+	})
+
+	t.Run("no version string keeps the instance id", func(t *testing.T) {
+		msg := BuildMessage(mustParse(t, stateUpdateBody), &Enrichment{AppID: "1234567890"})
+		if rendered := renderBlocks(msg); !strings.Contains(rendered, "ad7e6298") {
+			t.Errorf("instance UUID dropped even though no version is known:\n%s", rendered)
+		}
+	})
+}
+
+func sectionBlock(t *testing.T, msg *Message) *Block {
+	t.Helper()
+	b := blockOfType(msg, blockSection)
+	if b == nil {
+		t.Fatalf("no section block in %+v", msg.Blocks)
+	}
+	return b
+}
+
+func blockOfType(msg *Message, typ string) *Block {
+	for i, b := range msg.Blocks {
+		if b.Type == typ {
+			return &msg.Blocks[i]
+		}
+	}
+	return nil
 }
 
 // renderBlocks flattens every text fragment of a message for assertions.
@@ -189,7 +299,12 @@ func renderBlocks(msg *Message) string {
 			sb.WriteString(f.Text + "\n")
 		}
 		for _, e := range b.Elements {
-			sb.WriteString(e.Text + "\n")
+			switch el := e.(type) {
+			case Text:
+				sb.WriteString(el.Text + "\n")
+			case Button:
+				sb.WriteString(el.Text.Text + "\n" + el.URL + "\n")
+			}
 		}
 	}
 	return sb.String()

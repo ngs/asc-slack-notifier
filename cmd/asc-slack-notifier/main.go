@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
 
+	"go.ngs.io/asc-slack-notifier/internal/asc"
 	"go.ngs.io/asc-slack-notifier/internal/config"
 	"go.ngs.io/asc-slack-notifier/internal/slack"
 	"go.ngs.io/asc-slack-notifier/internal/webhook"
@@ -33,10 +34,28 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 
+	var enricher slack.Enricher
+	if cfg.EnrichmentEnabled() {
+		ascClient, err := asc.New(asc.Options{
+			KeyID:         cfg.ASCAPIKeyID,
+			IssuerID:      cfg.ASCAPIIssuerID,
+			PrivateKeyPEM: cfg.ASCAPIPrivateKey,
+		})
+		if err != nil {
+			logger.Error("failed to build App Store Connect client", slog.Any("error", err))
+			os.Exit(1)
+		}
+		enricher = &ascEnricher{client: ascClient}
+		logger.Info("App Store Connect API enrichment enabled",
+			slog.String("key_id", cfg.ASCAPIKeyID))
+	}
+
 	slackClient, err := slack.New(slack.Options{
 		WebhookURL: cfg.SlackWebhookURL,
 		BotToken:   cfg.SlackBotToken,
 		Channel:    cfg.SlackChannel,
+		Enricher:   enricher,
+		Logger:     logger,
 	})
 	if err != nil {
 		logger.Error("failed to build Slack client", slog.Any("error", err))
@@ -67,6 +86,25 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+// ascEnricher adapts asc.Client to the slack.Enricher interface.
+type ascEnricher struct{ client *asc.Client }
+
+// EnrichAppStoreVersion looks up the app, version and build of an App Store
+// version resource.
+func (a *ascEnricher) EnrichAppStoreVersion(ctx context.Context, id string) (*slack.Enrichment, error) {
+	info, err := a.client.AppStoreVersionInfo(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &slack.Enrichment{
+		AppID:         info.AppID,
+		AppName:       info.AppName,
+		VersionString: info.VersionString,
+		BuildNumber:   info.BuildNumber,
+		Platform:      info.Platform,
+	}, nil
 }
 
 // serveHTTP runs the handler as a normal HTTP server and shuts it down

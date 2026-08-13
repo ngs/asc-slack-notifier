@@ -1,8 +1,12 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +18,7 @@ func clearEnv(t *testing.T) {
 		"ASC_WEBHOOK_SECRET", "SLACK_WEBHOOK_URL", "SLACK_BOT_TOKEN", "SLACK_CHANNEL",
 		"RUN_MODE", "AWS_LAMBDA_FUNCTION_NAME", "PORT", "WEBHOOK_PATH", "HEALTH_PATH",
 		"NOTIFY_PING", "LOG_LEVEL",
+		"ASC_API_KEY_ID", "ASC_API_ISSUER_ID", "ASC_API_PRIVATE_KEY", "ASC_API_PRIVATE_KEY_PATH",
 	} {
 		t.Setenv(k, "")
 	}
@@ -137,6 +142,130 @@ func TestLoadRejectsCollidingPaths(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load error = nil, want an error for colliding paths")
+	}
+}
+
+const testKeyPEM = "-----BEGIN PRIVATE KEY-----\nMIGHAgEA\n-----END PRIVATE KEY-----\n"
+
+func TestLoadASCAPIDisabledByDefault(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ASC_WEBHOOK_SECRET", "s3cret")
+	t.Setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EnrichmentEnabled() {
+		t.Error("EnrichmentEnabled = true with no ASC API variables set")
+	}
+	if cfg.ASCAPIPrivateKey != nil {
+		t.Errorf("ASCAPIPrivateKey = %q, want nil", cfg.ASCAPIPrivateKey)
+	}
+}
+
+func TestLoadASCAPIFromEnv(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ASC_WEBHOOK_SECRET", "s3cret")
+	t.Setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
+	t.Setenv("ASC_API_KEY_ID", "KEYID123")
+	t.Setenv("ASC_API_ISSUER_ID", "issuer-uuid")
+	// Single-line value, as a secret manager or CI variable delivers it.
+	t.Setenv("ASC_API_PRIVATE_KEY", strings.ReplaceAll(testKeyPEM, "\n", `\n`))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.EnrichmentEnabled() {
+		t.Error("EnrichmentEnabled = false, want true")
+	}
+	if cfg.ASCAPIKeyID != "KEYID123" || cfg.ASCAPIIssuerID != "issuer-uuid" {
+		t.Errorf("key/issuer = %q/%q", cfg.ASCAPIKeyID, cfg.ASCAPIIssuerID)
+	}
+	if got := string(cfg.ASCAPIPrivateKey); got != testKeyPEM {
+		t.Errorf("private key = %q, want the literal \\n sequences expanded", got)
+	}
+}
+
+func TestLoadASCAPIFromBase64Env(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ASC_WEBHOOK_SECRET", "s3cret")
+	t.Setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
+	t.Setenv("ASC_API_KEY_ID", "KEYID123")
+	t.Setenv("ASC_API_ISSUER_ID", "issuer-uuid")
+	// base64 of the whole PEM, wrapped the way the base64 command emits it.
+	encoded := base64.StdEncoding.EncodeToString([]byte(testKeyPEM))
+	t.Setenv("ASC_API_PRIVATE_KEY", encoded[:20]+"\n"+encoded[20:])
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := string(cfg.ASCAPIPrivateKey); got != testKeyPEM {
+		t.Errorf("private key = %q, want the base64-decoded PEM", got)
+	}
+}
+
+func TestLoadASCAPIFromFile(t *testing.T) {
+	clearEnv(t)
+	path := filepath.Join(t.TempDir(), "AuthKey.p8")
+	if err := os.WriteFile(path, []byte(testKeyPEM), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	t.Setenv("ASC_WEBHOOK_SECRET", "s3cret")
+	t.Setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
+	t.Setenv("ASC_API_KEY_ID", "KEYID123")
+	t.Setenv("ASC_API_ISSUER_ID", "issuer-uuid")
+	t.Setenv("ASC_API_PRIVATE_KEY_PATH", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := string(cfg.ASCAPIPrivateKey); got != testKeyPEM {
+		t.Errorf("private key = %q, want the file contents", got)
+	}
+}
+
+func TestLoadASCAPIErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{name: "key ID only", env: map[string]string{"ASC_API_KEY_ID": "KEYID123"}},
+		{name: "no issuer", env: map[string]string{
+			"ASC_API_KEY_ID": "KEYID123", "ASC_API_PRIVATE_KEY": testKeyPEM,
+		}},
+		{name: "no private key", env: map[string]string{
+			"ASC_API_KEY_ID": "KEYID123", "ASC_API_ISSUER_ID": "issuer-uuid",
+		}},
+		{name: "unreadable key file", env: map[string]string{
+			"ASC_API_KEY_ID": "KEYID123", "ASC_API_ISSUER_ID": "issuer-uuid",
+			"ASC_API_PRIVATE_KEY_PATH": "/nonexistent/AuthKey.p8",
+		}},
+		{name: "key neither PEM nor base64", env: map[string]string{
+			"ASC_API_KEY_ID": "KEYID123", "ASC_API_ISSUER_ID": "issuer-uuid",
+			"ASC_API_PRIVATE_KEY": "not*valid*base64",
+		}},
+		{name: "base64 of non-PEM", env: map[string]string{
+			"ASC_API_KEY_ID": "KEYID123", "ASC_API_ISSUER_ID": "issuer-uuid",
+			"ASC_API_PRIVATE_KEY": "bm90IGEgUEVNIGtleQ==",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("ASC_WEBHOOK_SECRET", "s3cret")
+			t.Setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatal("Load error = nil, want an error")
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -17,6 +18,15 @@ import (
 
 // defaultAPIBaseURL is the Slack Web API root used with a bot token.
 const defaultAPIBaseURL = "https://slack.com/api"
+
+// Enricher fetches supplemental data for an event's related resource.
+type Enricher interface {
+	EnrichAppStoreVersion(ctx context.Context, versionID string) (*Enrichment, error)
+}
+
+// instanceTypeAppStoreVersions is the relationship type carrying an App Store
+// version, the only resource this service enriches.
+const instanceTypeAppStoreVersions = "appStoreVersions"
 
 // Options configures a Client. WebhookURL takes precedence when both an
 // Incoming Webhook URL and a bot token are provided.
@@ -27,6 +37,11 @@ type Options struct {
 	HTTPClient *http.Client
 	// APIBaseURL overrides the Slack Web API root. Intended for tests.
 	APIBaseURL string
+	// Enricher supplies App Store Connect data the webhook payload lacks. When
+	// nil, messages are rendered from the payload alone.
+	Enricher Enricher
+	// Logger defaults to slog.Default().
+	Logger *slog.Logger
 }
 
 // Client posts messages to Slack.
@@ -36,6 +51,8 @@ type Client struct {
 	channel    string
 	apiBaseURL string
 	httpClient *http.Client
+	enricher   Enricher
+	logger     *slog.Logger
 }
 
 // New builds a Client from opts. It returns an error when no destination is
@@ -50,6 +67,8 @@ func New(opts Options) (*Client, error) {
 		channel:    opts.Channel,
 		apiBaseURL: opts.APIBaseURL,
 		httpClient: opts.HTTPClient,
+		enricher:   opts.Enricher,
+		logger:     opts.Logger,
 	}
 	if c.apiBaseURL == "" {
 		c.apiBaseURL = defaultAPIBaseURL
@@ -57,13 +76,36 @@ func New(opts Options) (*Client, error) {
 	if c.httpClient == nil {
 		c.httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	if c.logger == nil {
+		c.logger = slog.Default()
+	}
 	return c, nil
 }
 
 // Notify renders the payload and posts it to Slack. It satisfies the notifier
 // interface expected by the webhook handler.
 func (c *Client) Notify(ctx context.Context, p *webhook.Payload) error {
-	return c.Post(ctx, BuildMessage(p))
+	return c.Post(ctx, BuildMessage(p, c.enrich(ctx, p)))
+}
+
+// enrich looks up the App Store Connect data for the payload's related
+// resource. A lookup failure is logged and yields nil: an App Store Connect
+// outage must never hold back the Slack notification.
+func (c *Client) enrich(ctx context.Context, p *webhook.Payload) *Enrichment {
+	if c.enricher == nil {
+		return nil
+	}
+	inst := p.Data.Instance()
+	if inst == nil || inst.Type != instanceTypeAppStoreVersions || inst.ID == "" {
+		return nil
+	}
+	e, err := c.enricher.EnrichAppStoreVersion(ctx, inst.ID)
+	if err != nil {
+		c.logger.Warn("App Store Connect enrichment failed",
+			slog.String("version_id", inst.ID), slog.Any("error", err))
+		return nil
+	}
+	return e
 }
 
 // Post sends an already rendered message to Slack.

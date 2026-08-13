@@ -17,11 +17,13 @@ type Message struct {
 }
 
 // Block is a Block Kit block. Only the subset used by this service is modeled.
+// Elements holds Text objects in a context block and Button objects in an
+// actions block; the model is marshal-only, so a single slice of any suffices.
 type Block struct {
 	Type     string `json:"type"`
 	Text     *Text  `json:"text,omitempty"`
 	Fields   []Text `json:"fields,omitempty"`
-	Elements []Text `json:"elements,omitempty"`
+	Elements []any  `json:"elements,omitempty"`
 }
 
 // Text is a Block Kit composition object.
@@ -30,14 +32,38 @@ type Text struct {
 	Text string `json:"text"`
 }
 
+// Button is a Block Kit button element that opens a URL.
+type Button struct {
+	Type string `json:"type"`
+	Text Text   `json:"text"`
+	URL  string `json:"url"`
+}
+
+// Enrichment carries data fetched from the App Store Connect API that is not
+// present in the webhook payload itself. A nil Enrichment renders exactly the
+// message the payload alone produces.
+type Enrichment struct {
+	AppID         string
+	AppName       string
+	VersionString string
+	BuildNumber   string
+	Platform      string
+}
+
 const (
 	blockHeader  = "header"
 	blockSection = "section"
 	blockContext = "context"
+	blockActions = "actions"
+
+	elementButton = "button"
 
 	textPlain  = "plain_text"
 	textMrkdwn = "mrkdwn"
 )
+
+// appStoreConnectAppURL is the App Store Connect distribution page of an app.
+const appStoreConnectAppURL = "https://appstoreconnect.apple.com/apps/%s/distribution"
 
 // stateEmoji maps App Store Connect state values to a leading emoji. Values not
 // listed fall back to the heuristics in emojiForState.
@@ -105,8 +131,10 @@ func emojiForState(state string) string {
 
 // BuildMessage renders a webhook payload as a Block Kit message. Three shapes
 // are produced: a ping acknowledgement, a state transition, and a generic
-// key/value rendering used for creation and unknown event types.
-func BuildMessage(p *webhook.Payload) *Message {
+// key/value rendering used for creation and unknown event types. When e is
+// non-nil, the App Store Connect data it carries is folded into the fields, the
+// fallback text and an "Open in App Store Connect" button.
+func BuildMessage(p *webhook.Payload, e *Enrichment) *Message {
 	if p.IsPing() {
 		return buildPingMessage(p)
 	}
@@ -122,23 +150,50 @@ func BuildMessage(p *webhook.Payload) *Message {
 		},
 	}
 
-	fields := buildFields(p)
+	fields := buildFields(p, e)
 	if len(fields) > 0 {
 		msg.Blocks = append(msg.Blocks, Block{Type: blockSection, Fields: fields})
+	}
+
+	if e != nil && e.AppID != "" {
+		msg.Blocks = append(msg.Blocks, Block{Type: blockActions, Elements: []any{Button{
+			Type: elementButton,
+			Text: Text{Type: textPlain, Text: "Open in App Store Connect"},
+			URL:  fmt.Sprintf(appStoreConnectAppURL, e.AppID),
+		}}})
 	}
 
 	if ctx := contextLine(p); ctx != "" {
 		msg.Blocks = append(msg.Blocks, Block{
 			Type:     blockContext,
-			Elements: []Text{{Type: textMrkdwn, Text: ctx}},
+			Elements: []any{Text{Type: textMrkdwn, Text: ctx}},
 		})
 	}
 
 	if p.Data.IsStateUpdate() {
-		msg.Text = fmt.Sprintf("%s: %s → %s", header,
+		msg.Text = fmt.Sprintf("%s%s: %s → %s", header, subjectSuffix(e),
 			orDash(p.Data.Attributes.OldValue()), orDash(p.Data.Attributes.NewValue()))
 	}
 	return msg
+}
+
+// subjectSuffix names the app and version the event is about, for the fallback
+// text shown in notifications and channel lists.
+func subjectSuffix(e *Enrichment) string {
+	if e == nil {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if e.AppName != "" {
+		parts = append(parts, e.AppName)
+	}
+	if e.VersionString != "" {
+		parts = append(parts, e.VersionString)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " — " + strings.Join(parts, " ")
 }
 
 func buildPingMessage(p *webhook.Payload) *Message {
@@ -147,7 +202,7 @@ func buildPingMessage(p *webhook.Payload) *Message {
 		Text: text,
 		Blocks: []Block{
 			{Type: blockSection, Text: &Text{Type: textMrkdwn, Text: text}},
-			{Type: blockContext, Elements: []Text{{
+			{Type: blockContext, Elements: []any{Text{
 				Type: textMrkdwn,
 				Text: fmt.Sprintf("type: `%s`", p.Data.Type),
 			}}},
@@ -155,12 +210,28 @@ func buildPingMessage(p *webhook.Payload) *Message {
 	}
 }
 
-// buildFields renders the event attributes as Block Kit fields. State updates
-// get a dedicated transition field; every other attribute is rendered as a
-// key/value pair in a stable order.
-func buildFields(p *webhook.Payload) []Text {
+// buildFields renders the event attributes as Block Kit fields. Enrichment
+// data, when present, leads. State updates get a dedicated transition field;
+// every other attribute is rendered as a key/value pair in a stable order.
+func buildFields(p *webhook.Payload, e *Enrichment) []Text {
 	attrs := p.Data.Attributes
 	var fields []Text
+
+	if e != nil {
+		for _, f := range []struct{ label, value string }{
+			{"App", e.AppName},
+			{"Version", e.VersionString},
+			{"Build", e.BuildNumber},
+		} {
+			if f.value == "" {
+				continue
+			}
+			fields = append(fields, Text{
+				Type: textMrkdwn,
+				Text: fmt.Sprintf("*%s*\n%s", f.label, truncate(f.value, 200)),
+			})
+		}
+	}
 
 	if p.Data.IsStateUpdate() {
 		fields = append(fields, Text{
@@ -195,7 +266,10 @@ func buildFields(p *webhook.Payload) []Text {
 			Text: fmt.Sprintf("*Timestamp*\n%s", ts),
 		})
 	}
-	if inst := p.Data.Instance(); inst != nil && (inst.Type != "" || inst.ID != "") {
+	// The raw instance UUID is only worth showing when nothing better is known:
+	// an enriched message names the app and version instead.
+	enriched := e != nil && e.VersionString != ""
+	if inst := p.Data.Instance(); !enriched && inst != nil && (inst.Type != "" || inst.ID != "") {
 		fields = append(fields, Text{
 			Type: textMrkdwn,
 			Text: fmt.Sprintf("*%s*\n`%s`", Humanize(orValue(inst.Type, "instance")), inst.ID),

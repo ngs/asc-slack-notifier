@@ -53,6 +53,9 @@ jobs:
           HEALTH_PATH: ${{ vars.HEALTH_PATH }}
           NOTIFY_PING: ${{ vars.NOTIFY_PING }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+          ASC_API_KEY_ID: ${{ vars.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ vars.ASC_API_ISSUER_ID }}
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
@@ -68,7 +71,7 @@ jobs:
           # "^@^" declares @ as the separator so that values containing commas
           # are passed through untouched.
           env_vars="ASC_WEBHOOK_SECRET=${ASC_WEBHOOK_SECRET}"
-          for name in SLACK_WEBHOOK_URL SLACK_BOT_TOKEN SLACK_CHANNEL WEBHOOK_PATH HEALTH_PATH NOTIFY_PING LOG_LEVEL; do
+          for name in SLACK_WEBHOOK_URL SLACK_BOT_TOKEN SLACK_CHANNEL WEBHOOK_PATH HEALTH_PATH NOTIFY_PING LOG_LEVEL ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_PRIVATE_KEY; do
             value="${!name}"
             if [ -n "${value}" ]; then
               env_vars="${env_vars}@${name}=${value}"
@@ -144,6 +147,9 @@ jobs:
           HEALTH_PATH: ${{ vars.HEALTH_PATH }}
           NOTIFY_PING: ${{ vars.NOTIFY_PING }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+          ASC_API_KEY_ID: ${{ vars.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ vars.ASC_API_ISSUER_ID }}
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
@@ -167,6 +173,9 @@ jobs:
             --arg HEALTH_PATH "${HEALTH_PATH}" \
             --arg NOTIFY_PING "${NOTIFY_PING}" \
             --arg LOG_LEVEL "${LOG_LEVEL}" \
+            --arg ASC_API_KEY_ID "${ASC_API_KEY_ID}" \
+            --arg ASC_API_ISSUER_ID "${ASC_API_ISSUER_ID}" \
+            --arg ASC_API_PRIVATE_KEY "${ASC_API_PRIVATE_KEY}" \
             '{Variables: ($ARGS.named | with_entries(select(.value != "")))}' \
             > /tmp/lambda-env.json
 
